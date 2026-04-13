@@ -40,6 +40,14 @@
  *   - include `struct list_head` linkage
  * ============================================================== */
 
+struct container_entry {
+    char container_id[64];
+    pid_t pid;
+    unsigned long soft_limit;
+    unsigned long hard_limit;
+    int soft_exceeded;
+    struct list_head list;
+};
 
 /* ==============================================================
  * TODO 2: Declare the global monitored list and a lock.
@@ -52,6 +60,8 @@
  * justify the choice in terms of the code paths you implemented.
  * ============================================================== */
 
+static LIST_HEAD(container_list);
+static DEFINE_MUTEX(container_lock);
 
 /* --- Provided: internal device / timer state --- */
 static struct timer_list monitor_timer;
@@ -144,6 +154,44 @@ static void timer_callback(struct timer_list *t)
      *   - avoid use-after-free while deleting during iteration
      * ============================================================== */
 
+struct container_entry *entry, *tmp;
+
+mutex_lock(&container_lock);
+
+list_for_each_entry_safe(entry, tmp, &container_list, list) {
+
+    long rss = get_rss_bytes(entry->pid);
+
+    // If process exited → remove it
+    if (rss < 0) {
+        list_del(&entry->list);
+        kfree(entry);
+        continue;
+    }
+
+    // SOFT LIMIT (only once)
+    if (rss > entry->soft_limit && !entry->soft_exceeded) {
+        log_soft_limit_event(entry->container_id,
+                             entry->pid,
+                             entry->soft_limit,
+                             rss);
+        entry->soft_exceeded = 1;
+    }
+
+    // HARD LIMIT → kill + remove
+    if (rss > entry->hard_limit) {
+        kill_process(entry->container_id,
+                     entry->pid,
+                     entry->hard_limit,
+                     rss);
+
+        list_del(&entry->list);
+        kfree(entry);
+    }
+}
+
+mutex_unlock(&container_lock);
+
     mod_timer(&monitor_timer, jiffies + CHECK_INTERVAL_SEC * HZ);
 }
 
@@ -179,6 +227,21 @@ static long monitor_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
          *   - validate allocation and limits
          *   - insert into the shared list under the chosen lock
          * ============================================================== */
+struct container_entry *entry;
+
+entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+if (!entry)
+    return -ENOMEM;
+
+strncpy(entry->container_id, req.container_id, sizeof(entry->container_id));
+entry->pid = req.pid;
+entry->soft_limit = req.soft_limit_bytes;
+entry->hard_limit = req.hard_limit_bytes;
+entry->soft_exceeded = 0;
+
+mutex_lock(&container_lock);
+list_add(&entry->list, &container_list);
+mutex_unlock(&container_lock);
 
         return 0;
     }
@@ -195,6 +258,21 @@ static long monitor_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
      *   - remove the matching entry safely if found
      *   - return status indicating whether a matching entry was removed
      * ============================================================== */
+
+struct container_entry *entry, *tmp;
+
+mutex_lock(&container_lock);
+
+list_for_each_entry_safe(entry, tmp, &container_list, list) {
+    if (entry->pid == req.pid) {
+        list_del(&entry->list);
+        kfree(entry);
+        mutex_unlock(&container_lock);
+        return 0;
+    }
+}
+
+mutex_unlock(&container_lock);
 
     return -ENOENT;
 }
@@ -245,7 +323,7 @@ static int __init monitor_init(void)
 /* --- Provided: Module Exit --- */
 static void __exit monitor_exit(void)
 {
-    del_timer_sync(&monitor_timer);
+    timer_shutdown_sync(&monitor_timer);
 
     /* ==============================================================
      * TODO 6: Free all remaining monitored entries.
@@ -254,6 +332,17 @@ static void __exit monitor_exit(void)
      *   - remove and free every list node safely
      *   - leave no leaked state on module unload
      * ============================================================== */
+
+struct container_entry *entry, *tmp;
+
+mutex_lock(&container_lock);
+
+list_for_each_entry_safe(entry, tmp, &container_list, list) {
+    list_del(&entry->list);
+    kfree(entry);
+}
+
+mutex_unlock(&container_lock);
 
     cdev_del(&c_dev);
     device_destroy(cl, dev_num);

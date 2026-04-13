@@ -29,7 +29,7 @@ io_pulse: io_pulse.c
 	gcc -O2 -Wall $(WORKLOAD_LDFLAGS) -o io_pulse io_pulse.c
 
 monitor.ko: monitor.c monitor_ioctl.h
-	$(MAKE) -C $(KDIR) M=$(PWD) modules
+	$(MAKE) -C $(KDIR) M=$(PWD) KCFLAGS=-Wno-error modules
 
 clean:
 	if [ -d "$(KDIR)" ]; then $(MAKE) -C $(KDIR) M=$(PWD) clean; fi
