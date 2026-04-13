@@ -32,3 +32,5 @@ logs/
 *.swp
 *~
 .vscode/
+rootfs*/
+alpine-minirootfs*.tar.gz
