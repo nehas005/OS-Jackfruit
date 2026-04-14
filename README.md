@@ -8,8 +8,8 @@ A lightweight Linux container runtime in C with a long-running parent supervisor
 
 | Name | SRN |
 |------|-----|
-| Nehaa S | [SRN-1] |
-| Shivang Jhalani | [SRN-2] |
+| Neha Sachin | [PES1UG24CS296] |
+| Nehaa Joshi | [PES1UG24CS297] |
 
 ---
 
