@@ -154,43 +154,42 @@ static void timer_callback(struct timer_list *t)
      *   - avoid use-after-free while deleting during iteration
      * ============================================================== */
 
-struct container_entry *entry, *tmp;
+    struct container_entry *entry, *tmp;
 
-mutex_lock(&container_lock);
+    mutex_lock(&container_lock);
 
-list_for_each_entry_safe(entry, tmp, &container_list, list) {
+    list_for_each_entry_safe(entry, tmp, &container_list, list) {
 
-    long rss = get_rss_bytes(entry->pid);
+        long rss = get_rss_bytes(entry->pid);
 
-    // If process exited → remove it
-    if (rss < 0) {
-        list_del(&entry->list);
-        kfree(entry);
-        continue;
+        if (rss < 0) {
+            list_del(&entry->list);
+            kfree(entry);
+            continue;
+        }
+
+        // SOFT LIMIT
+        if (rss > entry->soft_limit && !entry->soft_exceeded) {
+            log_soft_limit_event(entry->container_id,
+                                 entry->pid,
+                                 entry->soft_limit,
+                                 rss);
+            entry->soft_exceeded = 1;
+        }
+
+        // HARD LIMIT
+        if (rss > entry->hard_limit) {
+            kill_process(entry->container_id,
+                         entry->pid,
+                         entry->hard_limit,
+                         rss);
+
+            list_del(&entry->list);
+            kfree(entry);
+        }
     }
 
-    // SOFT LIMIT (only once)
-    if (rss > entry->soft_limit && !entry->soft_exceeded) {
-        log_soft_limit_event(entry->container_id,
-                             entry->pid,
-                             entry->soft_limit,
-                             rss);
-        entry->soft_exceeded = 1;
-    }
-
-    // HARD LIMIT → kill + remove
-    if (rss > entry->hard_limit) {
-        kill_process(entry->container_id,
-                     entry->pid,
-                     entry->hard_limit,
-                     rss);
-
-        list_del(&entry->list);
-        kfree(entry);
-    }
-}
-
-mutex_unlock(&container_lock);
+    mutex_unlock(&container_lock);
 
     mod_timer(&monitor_timer, jiffies + CHECK_INTERVAL_SEC * HZ);
 }
@@ -202,10 +201,10 @@ mutex_unlock(&container_lock);
  *   - register a PID with soft + hard limits
  *   - unregister a PID when the runtime no longer needs tracking
  * --------------------------------------------------------------- */
+
 static long monitor_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
 {
     struct monitor_request req;
-
     (void)f;
 
     if (cmd != MONITOR_REGISTER && cmd != MONITOR_UNREGISTER)
@@ -215,67 +214,54 @@ static long monitor_ioctl(struct file *f, unsigned int cmd, unsigned long arg)
         return -EFAULT;
 
     if (cmd == MONITOR_REGISTER) {
-        printk(KERN_INFO
-               "[container_monitor] Registering container=%s pid=%d soft=%lu hard=%lu\n",
-               req.container_id, req.pid, req.soft_limit_bytes, req.hard_limit_bytes);
+        struct container_entry *entry;
 
-        /* ==============================================================
-         * TODO 4: Add a monitored entry.
-         *
-         * Requirements:
-         *   - allocate and initialize one node from req
-         *   - validate allocation and limits
-         *   - insert into the shared list under the chosen lock
-         * ============================================================== */
-struct container_entry *entry;
+        entry = kmalloc(sizeof(*entry), GFP_KERNEL);
+        if (!entry)
+            return -ENOMEM;
 
-entry = kmalloc(sizeof(*entry), GFP_KERNEL);
-if (!entry)
-    return -ENOMEM;
+        strncpy(entry->container_id, req.container_id,
+                sizeof(entry->container_id) - 1);
+        entry->container_id[sizeof(entry->container_id) - 1] = '\0';
 
-strncpy(entry->container_id, req.container_id, sizeof(entry->container_id));
-entry->pid = req.pid;
-entry->soft_limit = req.soft_limit_bytes;
-entry->hard_limit = req.hard_limit_bytes;
-entry->soft_exceeded = 0;
+        entry->pid = req.pid;
+        entry->soft_limit = req.soft_limit_bytes;
+        entry->hard_limit = req.hard_limit_bytes;
+        entry->soft_exceeded = 0;
 
-mutex_lock(&container_lock);
-list_add(&entry->list, &container_list);
-mutex_unlock(&container_lock);
+        INIT_LIST_HEAD(&entry->list);
 
-        return 0;
-    }
-
-    printk(KERN_INFO
-           "[container_monitor] Unregister request container=%s pid=%d\n",
-           req.container_id, req.pid);
-
-    /* ==============================================================
-     * TODO 5: Remove a monitored entry on explicit unregister.
-     *
-     * Requirements:
-     *   - search by PID, container ID, or both
-     *   - remove the matching entry safely if found
-     *   - return status indicating whether a matching entry was removed
-     * ============================================================== */
-
-struct container_entry *entry, *tmp;
-
-mutex_lock(&container_lock);
-
-list_for_each_entry_safe(entry, tmp, &container_list, list) {
-    if (entry->pid == req.pid) {
-        list_del(&entry->list);
-        kfree(entry);
+        mutex_lock(&container_lock);
+        list_add_tail(&entry->list, &container_list);
         mutex_unlock(&container_lock);
+
         return 0;
     }
+
+    if (cmd == MONITOR_UNREGISTER) {
+        struct container_entry *entry, *tmp;
+
+        mutex_lock(&container_lock);
+
+        list_for_each_entry_safe(entry, tmp, &container_list, list) {
+            if (entry->pid == req.pid ||
+                strcmp(entry->container_id, req.container_id) == 0) {
+
+                list_del(&entry->list);
+                kfree(entry);
+
+                mutex_unlock(&container_lock);
+                return 0;
+            }
+        }
+
+        mutex_unlock(&container_lock);
+        return -ENOENT;
+    }
+
+    return -EINVAL;
 }
 
-mutex_unlock(&container_lock);
-
-    return -ENOENT;
-}
 
 /* --- Provided: file operations --- */
 static struct file_operations fops = {
@@ -284,8 +270,8 @@ static struct file_operations fops = {
 };
 
 /* --- Provided: Module Init --- */
-static int __init monitor_init(void)
-{
+static int __init monitor_init(void){
+
     if (alloc_chrdev_region(&dev_num, 0, 1, DEVICE_NAME) < 0)
         return -1;
 
