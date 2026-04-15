@@ -2,7 +2,8 @@
 
 A lightweight Linux container runtime in C with a long-running parent supervisor and a kernel-space memory monitor.
 
-*screenshots updated in repo*
+[screenshots updated in repo]
+
 ---
 
 ## 1. Team Information
